@@ -353,11 +353,11 @@ void io_outb(short port, char val) {
 }
 short io_inw(short port) {
 	short val;
-	//asm("in ax, dx" : "=a"(val) : "d"(port));
+	asm("in ax, dx" : "=a"(val) : "d"(port));
 	return val;
 }
 void io_outw(short port, short val) {
-	//asm("out dx, ax" : : "a"(val), "d"(port));
+	asm("out dx, ax" : : "a"(val), "d"(port));
 }
 void con_putch(char chr) {
     while (con_pos >= 80 * 25) {
