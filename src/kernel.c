@@ -482,7 +482,7 @@ void fat_write_sector(int lba, char *buf) {
 
     for (int i = 0; i < 256; i++) {
         unsigned short w = *(unsigned short *)(buf + i * 2);
-        //asm("out dx, ax" : : "a"(w), "d"(0x1F0));
+        asm("out dx, ax" : : "a"(w), "d"(0x1F0));
     }
 
     io_outb(0x1F7, 0xE7);
