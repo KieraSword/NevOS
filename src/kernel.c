@@ -45,6 +45,7 @@ void con_putch(char chr);
 void con_puts(char *msg);
 char con_getch();
 void con_gets(char *buf);
+void fat_mount(void);
 int fat_open(char *name);
 void fat_close(int fd);
 int fat_write(int fd, void *buf, int count);
@@ -115,13 +116,15 @@ struct fs_file {
 	unsigned int dir_sector;
 	unsigned int dir_offset;
 };
-typedef int (*syscall)(int, int, int);
+typedef int (*syscall)();
 struct fat_fs fs;
 struct fs_file fs_files[MAX_FILES];
 unsigned char fs_buf[512];
 int con_pos = 0;
+__attribute__((section(".text.entry")))
 void entry() {
 	idt_init();
+	fat_mount();
 	//int_call(0, 0, 0, 0);
 	con_write("Hello!", 6);
 	con_putch('\n');
@@ -131,6 +134,7 @@ void entry() {
 	con_putch('\n');
 	con_puts("1\t2\t3");
 	con_putch('\n');
+	//asm("ud2");
 	//con_puts("== NeverOS ==");
 	int fd = fat_create("hello.txt");
 	fat_write(fd, "Hello", 5);
@@ -201,8 +205,6 @@ void entry() {
 			}
 			con_putch('\n');
 		}
-	} else {
-		asm("ud2");
 	}
 	asm("hlt");
 }
@@ -309,7 +311,7 @@ __attribute__((naked)) void stub6() {
 	asm("pusha\n" "call int_ud\n" "popa\n" "iret\n");	
 }
 __attribute__((naked)) void stub42() {
-	asm("pusha\n" "push edx\n" "push ecx\n" "push ebx\n" "push eax\n" "call int_sys\n" "add esp, 16\n" "mov [esp + 28], eax\n" "popa\n" "iret\n");	
+	asm("pusha\n" "pushl %edx\n" "pushl %ecx\n" "pushl %ebx\n" "pushl %eax\n" "call int_sys\n" "addl $16, %esp\n" "movl %eax, 28(%esp)\n" "popa\n" "iret\n");
 }
 void int_ud() {
 	panic("Fatal exception: Undefined opcode (#UD)");
@@ -323,10 +325,10 @@ int int_sys(int a, int b, int c, int d) {
 	return syscalls[a](b, c, d);
 }
 void idt_load(struct idt_ptr *p) {
-    asm("lidt [%0]" : : "r"(p));
+    asm("lidt (%0)" : : "r"(p));
 }
 void int_call(int a, int b, int c, int d) {
-	asm("int 0x42" : : "a"(a), "b"(b), "c"(c), "d"(d));
+	asm("int $0x42" : : "a"(a), "b"(b), "c"(c), "d"(d));
 }
 void idt_set(int n, unsigned int addr) {
     hw_idt[n].off_lo = addr & 0xFFFF;
@@ -345,28 +347,28 @@ void idt_init() {
 }
 char io_inb(short port) {
 	char val;
-	asm("in al, dx" : "=a"(val) : "d"(port));
+	asm("inb %%dx, %%al" : "=a"(val) : "d"(port));
 	return val;
 }
 void io_outb(short port, char val) {
-	asm("out dx, al" : : "a"(val), "d"(port));
+	asm("outb %%al, %%dx" : : "a"(val), "d"(port));
 }
 short io_inw(short port) {
 	short val;
-	asm("in ax, dx" : "=a"(val) : "d"(port));
+	asm("inw %%dx, %%ax" : "=a"(val) : "d"(port));
 	return val;
 }
 void io_outw(short port, short val) {
-	asm("out dx, ax" : : "a"(val), "d"(port));
+	asm("outw %%ax, %%dx" : : "a"(val), "d"(port));
 }
 void con_putch(char chr) {
     while (con_pos >= 80 * 25) {
         for (int i = 0; i < 24 * 80; i++) {
-            VIDEO[i * 2]     = VIDEO[(i + 80) * 2];
+            VIDEO[i * 2] = VIDEO[(i + 80) * 2];
             VIDEO[i * 2 + 1] = VIDEO[(i + 80) * 2 + 1];
         }
         for (int i = 24 * 80; i < 80 * 25; i++) {
-            VIDEO[i * 2]     = ' ';
+            VIDEO[i * 2] = ' ';
             VIDEO[i * 2 + 1] = 0x07;
         }
         con_pos -= 80;
@@ -406,9 +408,9 @@ void con_putch(char chr) {
 			VIDEO[con_pos * 2] = chr;
 			VIDEO[con_pos * 2 + 1] = 7;
 			io_outb(0x3D4, 0x0F);
-			io_outb(0x3D5, (con_pos + 1 & 0xFF));
+			io_outb(0x3D5, ((con_pos + 1) & 0xFF));
 			io_outb(0x3D4, 0x0E);
-			io_outb(0x3D5, (con_pos + 1 >> 8) & 0xFF);
+			io_outb(0x3D5, ((con_pos + 1) >> 8) & 0xFF);
 			con_pos++;
 			io_outb(0x3F8, chr);
 		}
@@ -464,7 +466,7 @@ void fat_read_sector(int lba, char *buf) {
 
     for (int i = 0; i < 256; i++) {
         unsigned short w;
-        asm("in ax, dx" : "=a"(w) : "d"(0x1F0));
+        asm("inw %%dx, %%ax" : "=a"(w) : "d"(0x1F0));
         *(unsigned short *)(buf + i * 2) = w;
     }
 }
@@ -482,7 +484,7 @@ void fat_write_sector(int lba, char *buf) {
 
     for (int i = 0; i < 256; i++) {
         unsigned short w = *(unsigned short *)(buf + i * 2);
-        asm("out dx, ax" : : "a"(w), "d"(0x1F0));
+		asm("outw %%ax, %%dx" : : "a"(w), "d"(0x1F0));
     }
 
     io_outb(0x1F7, 0xE7);
