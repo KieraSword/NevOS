@@ -1,4 +1,5 @@
 typedef unsigned int size_t;
+typedef long int time_t;
 #define NULL ((void *)0)
 #define VIDEO ((char *)0xB8000)
 #define COM1 0x3F8
@@ -40,20 +41,25 @@ typedef unsigned int size_t;
 #define EDOM 33
 #define ERANGE 34
 #define MAX_FILES 16
+#define BCD2BIN(v) ((v & 0x0F) + ((v >> 4) * 10))
 void con_write(char *msg, size_t len);
 void con_putch(char chr);
 void con_puts(char *msg);
+void con_puti(int val);
 char con_getch();
 void con_gets(char *buf);
 void fat_mount(void);
 int fat_open(char *name);
 void fat_close(int fd);
 int fat_write(int fd, void *buf, int count);
+int fat_read(int fd, void *buf, int count);
 int fat_create(char *name);
 char io_inb(short port);
 void io_outb(short port, char val);
 void int_call(int a, int b, int c, int d);
 void idt_init();
+void time_rtctime();
+time_t time_time(time_t *tloc);
 size_t strlen(char *str);
 int strcmp(char *a, char *b);
 int atoi(char *str);
@@ -68,7 +74,7 @@ struct idt_ptr {
     unsigned int base;
 } __attribute__((packed));
 struct idt_entry hw_idt[256];
-struct idt_ptr   idtp;
+struct idt_ptr idtp;
 struct fat_fs {
     unsigned int bytes_per_sector;
     unsigned int sectors_per_cluster;
@@ -116,15 +122,24 @@ struct fs_file {
 	unsigned int dir_sector;
 	unsigned int dir_offset;
 };
+struct time_rtc {
+	char sec, min, hour, day, mon, year;
+};
+struct time_tm {
+	int tm_sec, tm_min, tm_hour, tm_mday, tm_mon, tm_year, m_yday;
+};
 typedef int (*syscall)();
 struct fat_fs fs;
 struct fs_file fs_files[MAX_FILES];
-unsigned char fs_buf[512];
+struct time_rtc time_current;
 int con_pos = 0;
+unsigned char fs_buf[512];
+int time_ticks = 0;
 __attribute__((section(".text.entry")))
 void entry() {
 	idt_init();
 	fat_mount();
+	time_rtctime();
 	//int_call(0, 0, 0, 0);
 	con_write("Hello!", 6);
 	con_putch('\n');
@@ -136,9 +151,16 @@ void entry() {
 	con_putch('\n');
 	//asm("ud2");
 	//con_puts("== NeverOS ==");
-	int fd = fat_create("hello.txt");
+	fat_create("hello.txt");
+	int fd = fat_open("hello.txt");
 	fat_write(fd, "Hello", 5);
+	char fbuf[256];
+	fat_read(fd, fbuf, 5);
 	fat_close(fd);
+	time_t now = time_time(NULL);
+	con_puts("Epoch: ");
+	con_puti(now);
+	con_putch('\n');
 	char buf[256];
 	int i = 0;
 	char c;
@@ -286,13 +308,13 @@ void itoa(int num, char *buf) {
     }
     buf[j] = '\0';
 }
-int sys_exit(int b, int c, int d) {
+int sys_exit(int code) {
 	return -1;
 }
-int sys_fork(int b, int c, int d) {
+int sys_fork() {
 	return -1;
 }
-int sys_read(int b, int c, int d) {
+int sys_read() {
 	return -1;
 }
 int sys_write(int b, int c, int d) {
@@ -301,7 +323,13 @@ int sys_write(int b, int c, int d) {
 int sys_open(int b, int c, int d) {
 	return -1;
 }
+int sys_create() {
+	return -1;
+}
 int sys_close(int b, int c, int d) {
+	return -1;
+}
+int sys_time() {
 	return -1;
 }
 __attribute__((naked)) void stub0() {
@@ -309,6 +337,9 @@ __attribute__((naked)) void stub0() {
 }
 __attribute__((naked)) void stub6() {
 	asm("pusha\n" "call int_ud\n" "popa\n" "iret\n");	
+}
+__attribute__((naked)) void stub20() {
+	asm("pusha\n" "call irq_tick\n" "popa\n" "iret\n");	
 }
 __attribute__((naked)) void stub42() {
 	asm("pusha\n" "pushl %edx\n" "pushl %ecx\n" "pushl %ebx\n" "pushl %eax\n" "call int_sys\n" "addl $16, %esp\n" "movl %eax, 28(%esp)\n" "popa\n" "iret\n");
@@ -323,6 +354,10 @@ int int_sys(int a, int b, int c, int d) {
 	static syscall syscalls[256] = {NULL, sys_exit, sys_fork, sys_read, sys_write, sys_open, sys_close};
 	if(a < 0 || a >= 256) return -1;
 	return syscalls[a](b, c, d);
+}
+void irq_tick() {
+	time_ticks++;
+	io_outb(0x20, 0x20);
 }
 void idt_load(struct idt_ptr *p) {
     asm("lidt (%0)" : : "r"(p));
@@ -342,6 +377,7 @@ void idt_init() {
     idtp.base = (unsigned int)&hw_idt;
     idt_set(0x00, (unsigned int)stub0);
     idt_set(0x06, (unsigned int)stub6);
+	idt_set(0x20, (unsigned int)stub20);
     idt_set(0x42, (unsigned int)stub42);
     idt_load(&idtp);
 }
@@ -418,6 +454,11 @@ void con_putch(char chr) {
 }
 void con_puts(char *msg) {
 	for(int i = 0; msg[i] != '\0'; i++) con_putch(msg[i]);
+}
+void con_puti(int val) {
+	char buf[12];
+	itoa(val, buf);
+	con_puts(buf);
 }
 void con_write(char *msg, size_t len) {
 	for(int i = 0; i < len; i++) con_putch(msg[i]);
@@ -518,7 +559,7 @@ int fat_cluster_to_sector(int cluster) {
 void fat_mount(void) {
     unsigned char buf[512];
     fat_read_sector(0, buf);
-    struct fat_boot_sector *bs = (struct fat_boot_sector *)buf;
+    struct fat_boot_sector *bs = (struct fat_boot_sector*)buf;
     fs.bytes_per_sector = bs->bytes_per_sector;
     fs.sectors_per_cluster = bs->sectors_per_cluster;
     fs.reserved_sectors = bs->reserved_sectors;
@@ -704,7 +745,7 @@ int fat_write(int fd, void *buf, int count) {
             for (unsigned int k = 0; k < avail; k++)
                 fs_buf[so + k] = in[done + k];
             fat_write_sector(sec, fs_buf);
-            done  += avail;
+            done += avail;
             chunk -= avail;
             sec++;
             so = 0;
@@ -766,4 +807,32 @@ int fat_read(int fd, void *buf, int len) {
 }
 void fat_close(int fd) {
     if (fd >= 0 && fd < MAX_FILES) fs_files[fd].used = 0;
+}
+void time_rtctime() {
+    io_outb(0x70, 0x00);
+    time_current.sec = BCD2BIN(io_inb(0x71));
+    io_outb(0x70, 0x02);
+    time_current.min = BCD2BIN(io_inb(0x71));
+    io_outb(0x70, 0x04);
+    time_current.hour = BCD2BIN(io_inb(0x71));
+    io_outb(0x70, 0x07);
+    time_current.day = BCD2BIN(io_inb(0x71));
+    io_outb(0x70, 0x08);
+    time_current.mon = BCD2BIN(io_inb(0x71));
+    io_outb(0x70, 0x09);
+    time_current.year = BCD2BIN(io_inb(0x71));
+}
+time_t time_time(time_t *tloc) {
+    int year = 2000 + time_current.year;
+    int days = 0;
+    for(int y = 1970; y < year; y++) days += (y % 4 == 0 && (y % 100 != 0 || y % 400 == 0)) ? 366 : 365;
+    static int mdays[] = {31, 28, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31};
+    for(int m = 1; m < time_current.mon; m++) {
+        days += mdays[m - 1];
+        if (m == 2 && year % 4 == 0 && (year % 100 != 0 || year % 400 == 0)) days++;
+    }
+    days += time_current.day - 1;
+    time_t time = days * 86400 + time_current.hour * 3600 + time_current.min * 60 + time_current.sec + time_ticks;
+    if(tloc) *tloc = time;
+    return time;
 }

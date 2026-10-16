@@ -16,7 +16,7 @@ $(BOOT): $(SRC_DIR)/$(BOOT).asm
 $(KERNEL): $(SRC_DIR)/$(KERNEL).c
 	$(CC) $< $(CFLAGS) -o $(BIN_DIR)/$(KERNEL)
 $(IMG): $(BOOT) $(KERNEL)
-	cat $(BIN_DIR)/boot $(BIN_DIR)/kernel >  $(OUT_DIR)/$(IMG)
+	cat $(BIN_DIR)/boot $(BIN_DIR)/kernel > $(OUT_DIR)/$(IMG)
 
 clean:
 	rm -rf $(BIN_DIR)/*
