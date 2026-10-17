@@ -1,5 +1,7 @@
 typedef unsigned int size_t;
 typedef long int time_t;
+typedef int fd_t;
+typedef int pid_t;
 #define NULL ((void *)0)
 #define VIDEO ((char *)0xB8000)
 #define COM1 0x3F8
@@ -40,26 +42,34 @@ typedef long int time_t;
 #define EPIPE 32
 #define EDOM 33
 #define ERANGE 34
+#define EDEADLK 35
+#define ENAMETOOLONG 36
+#define ENOLCK 37
+#define ENOSYS 38
 #define MAX_FILES 16
 #define BCD2BIN(v) ((v & 0x0F) + ((v >> 4) * 10))
-void con_write(char *msg, size_t len);
+#define JUMP(a) ((void (*)(void))(a))()
+int con_write(char *msg, size_t len);
 void con_putch(char chr);
 void con_puts(char *msg);
 void con_puti(int val);
 char con_getch();
 void con_gets(char *buf);
+int con_read(char *msg, size_t len);
 void fat_mount(void);
 int fat_open(char *name);
 void fat_close(int fd);
 int fat_write(int fd, void *buf, int count);
 int fat_read(int fd, void *buf, int count);
 int fat_create(char *name);
+int fat_delete(char *name);
 char io_inb(short port);
 void io_outb(short port, char val);
-void int_call(int a, int b, int c, int d);
+int sys_syscall(int a, int b, int c, int d);
 void idt_init();
 void time_rtctime();
 time_t time_time(time_t *tloc);
+void user_enter(void *entry, void *stack);
 size_t strlen(char *str);
 int strcmp(char *a, char *b);
 int atoi(char *str);
@@ -128,20 +138,48 @@ struct time_rtc {
 struct time_tm {
 	int tm_sec, tm_min, tm_hour, tm_mday, tm_mon, tm_year, m_yday;
 };
+struct user_task {
+    int *entry;
+    int *stack;
+    int size;
+    int active;
+};
+struct user_tss_entry {
+    unsigned int prev_tss;
+    unsigned int esp0;
+    unsigned int ss0;
+    unsigned int esp1;
+    unsigned int ss1;
+    unsigned int esp2;
+    unsigned int ss2;
+    unsigned int cr3;
+    unsigned int eip;
+    unsigned int eflags;
+    unsigned int eax, ecx, edx, ebx;
+    unsigned int esp, ebp, esi, edi;
+    unsigned int es, cs, ss, ds, fs, gs;
+    unsigned int ldt;
+    unsigned short trap;
+    unsigned short iomap_base;
+} __attribute__((packed));
 typedef int (*syscall)();
 struct fat_fs fs;
 struct fs_file fs_files[MAX_FILES];
 struct time_rtc time_current;
+struct user_task user_tasks;
+struct user_tss_entry user_tss;
 int con_pos = 0;
 unsigned char fs_buf[512];
 int time_ticks = 0;
+unsigned char kstack[4096] __attribute__((aligned(16)));
+unsigned char ustack[4096] __attribute__((aligned(16)));
+unsigned char *gdt_start = 0x7C02;
 __attribute__((section(".text.entry")))
 void entry() {
 	idt_init();
 	fat_mount();
 	time_rtctime();
-	//int_call(0, 0, 0, 0);
-	con_write("Hello!", 6);
+	/*con_write("Hello!", 6);
 	con_putch('\n');
 	con_write("Hello.", 6);
 	con_putch('\n');
@@ -152,23 +190,26 @@ void entry() {
 	//asm("ud2");
 	//con_puts("== NeverOS ==");
 	fat_create("hello.txt");
-	int fd = fat_open("hello.txt");
-	fat_write(fd, "Hello", 5);
-	char fbuf[256];
-	fat_read(fd, fbuf, 5);
+	fd_t fd = fat_open("hello.txt");
+	fat_write(fd, "Hello\n", 6);
+	fd = fat_open("hello.txt");
+	char fbuf[12];
+	fat_read(fd, fbuf, 6);
+	con_puts(fbuf);
 	fat_close(fd);
 	time_t now = time_time(NULL);
 	con_puts("Epoch: ");
 	con_puti(now);
 	con_putch('\n');
-	char buf[256];
+	sys_syscall(5, 1, "Hello world\n", 12);*/
+	/*char buf[256];
 	int i = 0;
 	char c;
 	while((c = con_getch()) != '\n') {
 		con_putch(c);
 		buf[i++] = c;
 	}
-	con_putch('\n');
+	con_putch('\n');/
 	if(strcmp(buf, "calc") == 0) {
 		while(1) {
 			int a = 0;
@@ -227,7 +268,15 @@ void entry() {
 			}
 			con_putch('\n');
 		}
-	}
+	}*/
+	fd_t progfile = fat_open("program.nxe");
+	char progbuf[256];
+	//con_puti(&progbuf);
+	fat_read(progfile, progbuf, 256);
+	fat_close(progfile);
+	user_tss_init();
+	user_enter(progbuf, ustack);
+	//JUMP(progbuf);
 	asm("hlt");
 }
 void panic(char *msg) {
@@ -264,7 +313,7 @@ void panic(char *msg) {
 	con_puts(edx_str);
 	con_putch('\n');
 	#if defined(PANIC_RESET)
-		asm("jmp 0xFFFFFFF0");
+		asm("jmp $0xFFFFFFF0");
 	#elif defined(PANIC_POWEROFF)
 		io_outw(0x604, 0x2000);
 	#endif
@@ -308,29 +357,53 @@ void itoa(int num, char *buf) {
     }
     buf[j] = '\0';
 }
+int sys_restart() {
+	return -ENOSYS;
+}
 int sys_exit(int code) {
-	return -1;
+	char buf[12];
+	itoa(code, buf);
+	panic(buf);
+	return -ENOSYS;
 }
 int sys_fork() {
-	return -1;
+	return -ENOSYS;
 }
-int sys_read() {
-	return -1;
+int sys_spawn() {
+	return -ENOSYS;
 }
-int sys_write(int b, int c, int d) {
-	return -1;
+int sys_read(fd_t fd, char *buf, int len) {
+	if(fd > 2) {
+		return fat_read(fd, buf, len);
+	} else if(fd == 0) {
+		return con_read(buf, len);
+	} else return -EBADF;
 }
-int sys_open(int b, int c, int d) {
-	return -1;
+int sys_write(fd_t fd, char *buf, int len) {
+	if(len < 0) return -EINVAL;
+	if(fd > 2) {
+		return fat_write(fd, buf, len);
+	} else if(fd == 1 || fd == 2) {
+		return con_write(buf, len);
+	} else return -EBADF;
 }
-int sys_create() {
-	return -1;
+fd_t sys_create(char *name) {
+	return fat_create(name);
 }
-int sys_close(int b, int c, int d) {
-	return -1;
+fd_t sys_open(char *name) {
+	return fat_open(name);
 }
-int sys_time() {
-	return -1;
+int sys_close(fd_t fd) {
+	if(fd > 2) {
+		fat_close(fd);
+		return 0;
+	} else return -EBADF;
+}
+int sys_remove(char *name) {
+	return fat_delete(name);
+}
+int sys_time(time_t *tloc) {
+	return time_time(tloc);
 }
 __attribute__((naked)) void stub0() {
 	asm("pusha\n" "call int_de\n" "popa\n" "iret\n");	
@@ -338,11 +411,17 @@ __attribute__((naked)) void stub0() {
 __attribute__((naked)) void stub6() {
 	asm("pusha\n" "call int_ud\n" "popa\n" "iret\n");	
 }
-__attribute__((naked)) void stub20() {
+__attribute__((naked)) void stub13() {
+	asm("pusha\n" "call int_gp\n" "popa\n" "iret\n");	
+}
+__attribute__((naked)) void stub32() {
 	asm("pusha\n" "call irq_tick\n" "popa\n" "iret\n");	
 }
-__attribute__((naked)) void stub42() {
+__attribute__((naked)) void stub66() {
 	asm("pusha\n" "pushl %edx\n" "pushl %ecx\n" "pushl %ebx\n" "pushl %eax\n" "call int_sys\n" "addl $16, %esp\n" "movl %eax, 28(%esp)\n" "popa\n" "iret\n");
+}
+__attribute__((naked)) void stub118() {
+	asm("pusha\n" "call mystery\n" "popa\n" "iret\n");	
 }
 void int_ud() {
 	panic("Fatal exception: Undefined opcode (#UD)");
@@ -350,8 +429,14 @@ void int_ud() {
 void int_de() {
 	panic("Fatal exception: Division error (#DE)");
 }
+void int_gp() {
+	panic("Fatal exception: Protection fault (#GP)");
+}
+void mystery() {
+	//con_puts("Mystery fault\n");
+}
 int int_sys(int a, int b, int c, int d) {
-	static syscall syscalls[256] = {NULL, sys_exit, sys_fork, sys_read, sys_write, sys_open, sys_close};
+	static syscall syscalls[256] = {sys_restart, sys_exit, sys_fork, sys_spawn, sys_read, sys_write, sys_open, sys_close, sys_create, sys_remove, sys_time};
 	if(a < 0 || a >= 256) return -1;
 	return syscalls[a](b, c, d);
 }
@@ -362,8 +447,9 @@ void irq_tick() {
 void idt_load(struct idt_ptr *p) {
     asm("lidt (%0)" : : "r"(p));
 }
-void int_call(int a, int b, int c, int d) {
-	asm("int $0x42" : : "a"(a), "b"(b), "c"(c), "d"(d));
+int sys_syscall(int a, int b, int c, int d) {
+	asm("int $0x42" : "=a"(a) : "a"(a), "b"(b), "c"(c), "d"(d));
+	return a;
 }
 void idt_set(int n, unsigned int addr) {
     hw_idt[n].off_lo = addr & 0xFFFF;
@@ -377,8 +463,11 @@ void idt_init() {
     idtp.base = (unsigned int)&hw_idt;
     idt_set(0x00, (unsigned int)stub0);
     idt_set(0x06, (unsigned int)stub6);
-	idt_set(0x20, (unsigned int)stub20);
-    idt_set(0x42, (unsigned int)stub42);
+    idt_set(0x0D, (unsigned int)stub13);
+	idt_set(0x20, (unsigned int)stub32);
+    idt_set(0x42, (unsigned int)stub66);
+	hw_idt[0x42].flags = 0xEE;
+    idt_set(0x76, (unsigned int)stub118);
     idt_load(&idtp);
 }
 char io_inb(short port) {
@@ -460,8 +549,10 @@ void con_puti(int val) {
 	itoa(val, buf);
 	con_puts(buf);
 }
-void con_write(char *msg, size_t len) {
-	for(int i = 0; i < len; i++) con_putch(msg[i]);
+int con_write(char *msg, size_t len) {
+	int i = 0;
+	for(i = 0; i < len; i++) con_putch(msg[i]);
+	return i;
 }
 char con_getch() {
 	static const char kbd[128] = {0, 27, '1', '2', '3', '4', '5', '6', '7', '8', '9', '0', '-', '=', '\b', '\t', 'q', 'w', 'e', 'r', 't', 'y', 'u', 'i', 'o', 'p', '[', ']', '\n', 0, 'a', 's', 'd', 'f', 'g', 'h', 'j', 'k', 'l', ';', '\'', '`', 0, '\\', 'z', 'x', 'c', 'v', 'b', 'n', 'm', ',', '.', '/', 0, '*', 0, ' ',};
@@ -492,6 +583,16 @@ void con_gets(char *buf) {
 		buf[i++] = c;
 	}
 	buf[i] = '\0';
+}
+int con_read(char *buf, size_t len) {
+	int i = 0;
+	char c;
+	while((c = con_getch()) && i < len) {
+		con_putch(c);
+		buf[i++] = c;
+	}
+	buf[i] = '\0';
+	return i;
 }
 void fat_read_sector(int lba, char *buf) {
     while (io_inb(0x1F7) & 0x80);
@@ -701,11 +802,11 @@ int fat_update_dir(int fd) {
     fat_write_sector(f->dir_sector, fs_buf);
     return 0;
 }
-int fat_write(int fd, void *buf, int count) {
+int fat_write(int fd, void *buf, int len) {
     if (fd < 0 || fd >= MAX_FILES) return -1;
     struct fs_file *f = &fs_files[fd];
     if (!f->used) return -1;
-    if (count <= 0) return 0;
+    if (len <= 0) return 0;
 
     unsigned int bpc = fs.bytes_per_sector * fs.sectors_per_cluster;
     unsigned char *in = (unsigned char *)buf;
@@ -732,11 +833,11 @@ int fat_write(int fd, void *buf, int count) {
 
     unsigned int off = f->pos % bpc;
 
-    while (done < (unsigned int)count) {
-        unsigned int sec   = fat_cluster_to_sector(cluster) + off / fs.bytes_per_sector;
-        unsigned int so    = off % fs.bytes_per_sector;
+    while (done < (unsigned int)len) {
+        unsigned int sec = fat_cluster_to_sector(cluster) + off / fs.bytes_per_sector;
+        unsigned int so = off % fs.bytes_per_sector;
         unsigned int chunk = bpc - off;
-        if (chunk > (unsigned int)count - done) chunk = (unsigned int)count - done;
+        if (chunk > (unsigned int)len - done) chunk = (unsigned int)len - done;
 
         while (chunk > 0) {
             fat_read_sector(sec, fs_buf);
@@ -753,7 +854,7 @@ int fat_write(int fd, void *buf, int count) {
 
         off = 0;
 
-        if (done < (unsigned int)count) {
+        if (done < (unsigned int)len) {
             unsigned int next = fat_next(cluster);
             if (next >= 0x0FFFFFF8) {
                 unsigned int c = fat_alloc();
@@ -808,6 +909,25 @@ int fat_read(int fd, void *buf, int len) {
 void fat_close(int fd) {
     if (fd >= 0 && fd < MAX_FILES) fs_files[fd].used = 0;
 }
+int fat_delete(char *name) {
+    unsigned char entry[32];
+    unsigned int sector, offset;
+    if (fat_find_entry(name, entry, &sector, &offset) != 0)return -1;
+    unsigned int lo = *(unsigned short *)(entry + 26);
+    unsigned int hi = *(unsigned short *)(entry + 20);
+    unsigned int cluster = ((hi & 0x0FFF) << 16) | lo;
+    fat_read_sector(sector, fs_buf);
+    fs_buf[offset] = 0xE5;
+    fat_write_sector(sector, fs_buf);
+    while (cluster >= 2 && cluster < 0x0FFFFFF8) {
+        unsigned int next = fat_next(cluster);
+        if (next == 0x0FFFFFF7 || next == 0xFFFFFFFE) return -1;
+        fat_set(cluster, 0);
+        if (next >= 0x0FFFFFF8) break;
+        cluster = next;
+    }
+    return 0;
+}
 void time_rtctime() {
     io_outb(0x70, 0x00);
     time_current.sec = BCD2BIN(io_inb(0x71));
@@ -835,4 +955,42 @@ time_t time_time(time_t *tloc) {
     time_t time = days * 86400 + time_current.hour * 3600 + time_current.min * 60 + time_current.sec + time_ticks;
     if(tloc) *tloc = time;
     return time;
+}
+__attribute__((naked)) void user_enter(void *entry, void *stack) {
+    asm(
+        "movl 4(%esp), %eax\n"
+        "movl 8(%esp), %edx\n"
+        "movw $0x23, %cx\n"
+        "movw %cx, %ds\n"
+        "movw %cx, %es\n"
+        "movw %cx, %fs\n"
+        "movw %cx, %gs\n"
+        "pushl $0x23\n"
+        "pushl %edx\n"
+        "pushfl\n"
+        "popl %ecx\n"
+        "orl $0x200, %ecx\n"
+        "pushl %ecx\n"
+        "pushl $0x1B\n"
+        "pushl %eax\n"
+        "iret\n"
+    );
+}
+void user_tss_set(int index, int base, int limit) {
+    unsigned char *desc = gdt_start + index * 8;
+    desc[0] = limit & 0xFF;
+    desc[1] = (limit >> 8) & 0xFF;
+    desc[2] = base & 0xFF;
+    desc[3] = (base >> 8) & 0xFF;
+    desc[4] = (base >> 16) & 0xFF;
+    desc[5] = 0x89;
+    desc[6] = (limit >> 16) & 0x0F;
+    desc[7] = (base >> 24) & 0xFF;
+}
+void user_tss_init() {
+	user_tss.ss0 = 0x10;
+	user_tss.esp0 = kstack + sizeof(kstack);
+	user_tss.iomap_base = sizeof(user_tss);
+	user_tss_set(5, &user_tss, sizeof(user_tss) - 1);
+	asm("ltr %%ax" : : "a"(0x28));
 }
