@@ -136,11 +136,12 @@ struct time_rtc {
 	char sec, min, hour, day, mon, year;
 };
 struct time_tm {
-	int tm_sec, tm_min, tm_hour, tm_mday, tm_mon, tm_year, m_yday;
+	int tm_sec, tm_min, tm_hour, tm_mday, tm_mon, tm_year, tm_yday;
 };
 struct user_task {
     int *entry;
     int *stack;
+    unsigned char *data[];
     int size;
     int active;
 };
@@ -166,7 +167,7 @@ typedef int (*syscall)();
 struct fat_fs fs;
 struct fs_file fs_files[MAX_FILES];
 struct time_rtc time_current;
-struct user_task user_tasks;
+struct user_task user_tasks[2048];
 struct user_tss_entry user_tss;
 int con_pos = 0;
 unsigned char fs_buf[512];
@@ -453,9 +454,9 @@ int sys_syscall(int a, int b, int c, int d) {
 }
 void idt_set(int n, unsigned int addr) {
     hw_idt[n].off_lo = addr & 0xFFFF;
-    hw_idt[n].sel    = 0x08;
-    hw_idt[n].zero   = 0;
-    hw_idt[n].flags  = 0x8E;
+    hw_idt[n].sel = 0x08;
+    hw_idt[n].zero = 0;
+    hw_idt[n].flags = 0x8E;
     hw_idt[n].off_hi = (addr >> 16) & 0xFFFF;
 }
 void idt_init() {
